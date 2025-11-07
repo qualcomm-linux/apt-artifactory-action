@@ -1,0 +1,97 @@
+name: "Upload Debian to Artifactory"
+description: "Uploads Debian artifacts from a .changes file to Artifactory"
+inputs:
+  server_url:
+    description: "Artifactory server URL (e.g. https://qartifactory.pe.jfrog.io)"
+    required: false
+    default: "https://qartifactory.pe.jfrog.io"
+  target_base_repo:
+    description: "Target repo name (e.g. deb-local or deb-remote)"
+    required: true
+  changes_path:
+    description: "Path to .changes file with sources and binaries to upload"
+    required: true
+  provenance_info:
+    description: "Overrides and extra artifactory properties to set on target files."
+    required: false
+    default: "{}"
+  secret:
+    description: "Artifactory token"
+    required: true
+  component:
+    description: "Component name for the package"
+    required: false
+    default: "main"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install prerequisites
+      shell: bash
+      run: |
+        SUDO=sudo
+        if [ "$(id -u)" = 0 ]; then
+            SUDO=""
+        fi
+        $SUDO apt update
+        $SUDO apt install -y devscripts dctrl-tools jq
+
+    - name: Setup JFrog CLI
+      uses: jfrog/setup-jfrog-cli@v4
+      with:
+        version: latest
+
+    - name: Configure JFrog server
+      shell: bash
+      env:
+        SERVER_URL: ${{ inputs.server_url }}
+        TOKEN: ${{ inputs.secret }}
+      run: |
+        jf c add artifactory-server \
+          --url "$SERVER_URL" \
+          --access-token "$TOKEN" \
+          --interactive=false
+
+    - name: Parse .changes and provenance
+      shell: bash
+      env:
+        CHANGES_PATH: ${{ inputs.changes_path }}
+        PROVENANCE_INFO: ${{ inputs.provenance_info }}
+        COMPONENT: ${{ inputs.component }}
+      run: |
+        set -euo pipefail
+        CHANGES_DIR="$(dirname "$CHANGES_PATH")"
+        CHANGES_FILE="$(basename "$CHANGES_PATH")"
+        cd "$CHANGES_DIR"
+
+        SUITE="$(grep-dctrl -ns Distribution . "$CHANGES_FILE")"
+        SOURCE_PKG="$(grep-dctrl -ns Source . "$CHANGES_FILE")"
+        ALL_FILES=$(grep-dctrl -nsFiles . "$CHANGES_FILE" | awk '{print $5}' | tr '\n' ' ')
+
+        PROPS="deb.distribution=${SUITE};deb.component=${COMPONENT}"
+        for key in $(echo "$PROVENANCE_INFO" | jq -r 'keys[]'); do
+          val=$(echo "$PROVENANCE_INFO" | jq -r --arg k "$key" '.[$k]')
+          PROPS="${PROPS};${key}=${val}"
+        done
+
+        echo "ALL_FILES=$ALL_FILES" >> $GITHUB_ENV
+        echo "SOURCE_PKG=$SOURCE_PKG" >> $GITHUB_ENV
+        echo "PROPS=$PROPS" >> $GITHUB_ENV
+
+    - name: Upload all artifacts with architecture detection
+      shell: bash
+      env:
+        TARGET_BASE_REPO: ${{ inputs.target_base_repo }}
+      run: |
+        TARGET_DIR="$TARGET_BASE_REPO/pool/$SOURCE_PKG/"
+        for f in $ALL_FILES; do
+          if [[ "$f" =~ _arm64\.deb$ || "$f" =~ _arm64\.ddeb$ ]]; then
+            PROPS="${PROPS};deb.architecture=arm64"
+          elif [[ "$f" =~ _amd64\.deb$ || "$f" =~ _amd64\.ddeb$ ]]; then
+            PROPS="${PROPS};deb.architecture=amd64"
+          fi
+          echo "Uploading $f with props: $PROPS"
+          jf rt upload --server-id=artifactory-server \
+            --target-props "${PROPS}" \
+            "$f" "$TARGET_DIR"
+        done
