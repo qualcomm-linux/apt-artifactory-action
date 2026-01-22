@@ -15,7 +15,7 @@ Push artifacts to artifactory using this GH action
               "commit": "${{ github.sha }}",
               "workflow": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
-          secret: ${{ secrets.ACCESS_TOKEN }}
+          qsc_api_key: ${{ secrets.QSC_API_KEY }}
               
 
 

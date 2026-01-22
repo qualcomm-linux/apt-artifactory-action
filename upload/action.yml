@@ -2,24 +2,27 @@ name: "Upload Debian to Artifactory"
 description: "Uploads Debian artifacts from a .changes file to Artifactory"
 inputs:
   server_url:
-    description: "Artifactory server URL (e.g. https://qartifactory.pe.jfrog.io)"
+    description: "Artifactory server URL"
     required: false
     default: "https://qartifactory.pe.jfrog.io"
   target_base_repo:
     description: "Target repo name (e.g. deb-local or deb-remote)"
     required: true
   changes_path:
-    description: "Path to .changes file with sources and binaries to upload"
+    description: "Path to .changes file"
     required: true
   provenance_info:
-    description: "Overrides and extra artifactory properties to set on target files."
+    description: "Extra artifactory properties"
     required: false
     default: "{}"
-  secret:
-    description: "Artifactory token"
-    required: true
+  access_token:
+    description: "Artifactory access token (mutually exclusive with qsc_api_key)"
+    required: false
+  qsc_api_key:
+    description: "QSC API key - used to generate a temporary access token (mutually exclusive with access_token)"
+    required: false
   component:
-    description: "Component name for the package"
+    description: "Component name"
     required: false
     default: "main"
 
@@ -31,10 +34,49 @@ runs:
       run: |
         SUDO=sudo
         if [ "$(id -u)" = 0 ]; then
-            SUDO=""
+          SUDO=""
         fi
         $SUDO apt update
-        $SUDO apt install -y devscripts dctrl-tools jq
+        $SUDO apt install -y devscripts dctrl-tools jq curl
+
+    - name: Generate token if qsc_api_key is provided
+      env:
+        QSC_API_KEY: ${{ inputs.qsc_api_key }}
+        ARTIFACTORY_ACCESS_TOKEN: ${{ inputs.access_token }}
+      id: gen_token
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ -n "$QSC_API_KEY" ] && [ -n "$ARTIFACTORY_ACCESS_TOKEN" ]; then
+          echo "ERROR: Both qsc_api_key and access_token were provided. These are not compatible."
+          exit 1
+        fi
+
+        if [ -n "$QSC_API_KEY" ]; then
+          echo "Generating access token using qsc_api_key..."
+          response=$(curl -s -X POST 'https://apigwx-aws.qualcomm.com/saga/api/qsc/v1/chipSoftware/component/artifactory/release/artifact/debian/public/create/token' \
+            -H 'Content-Type: application/json' \
+            -H 'X-QCOM-TokenType: apikey' \
+            -H "Authorization: $QSC_API_KEY" \
+            -d '{"softwareName":"LE.TEST.1.0","softwareType":"SoftwareImage","releaseTag":"1234"}')
+
+          token=$(echo "$response" | jq -r '.token')
+
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "ERROR: Failed to generate access token from qsc_api_key."
+            echo "Response was: $response"
+            exit 1
+          fi
+
+          echo "access_token=$token" >> $GITHUB_OUTPUT
+        elif [ -n "$ARTIFACTORY_ACCESS_TOKEN" ]; then
+          echo "Using provided access_token..."
+          echo "access_token=$ARTIFACTORY_ACCESS_TOKEN" >> $GITHUB_OUTPUT
+        else
+          echo "ERROR: Neither qsc_api_key nor access_token provided."
+          exit 1
+        fi
 
     - name: Setup JFrog CLI
       uses: jfrog/setup-jfrog-cli@v4
@@ -44,8 +86,8 @@ runs:
     - name: Configure JFrog server
       shell: bash
       env:
+        TOKEN: "${{ steps.gen_token.outputs.access_token }}"
         SERVER_URL: ${{ inputs.server_url }}
-        TOKEN: ${{ inputs.secret }}
       run: |
         jf c add artifactory-server \
           --url "$SERVER_URL" \
@@ -56,8 +98,8 @@ runs:
       shell: bash
       env:
         CHANGES_PATH: ${{ inputs.changes_path }}
-        PROVENANCE_INFO: ${{ inputs.provenance_info }}
         COMPONENT: ${{ inputs.component }}
+        PROVENANCE_INFO: ${{ inputs.provenance_info }}
       run: |
         set -euo pipefail
         CHANGES_DIR="$(dirname "$CHANGES_PATH")"
