@@ -14,7 +14,7 @@ In general, contributors should develop on branches based off of `main` and pull
 1. [Fork](https://github.com/qualcomm/<REPLACE-ME>/fork) and clone the repository.
 
     ```bash
-    git clone https://github.com/<username>/<REPLACE-ME>.git
+    git clone https://github.com/<username>/apt-artifactory-action.git
     ```
 
 1. Create a new branch based on `main`:
@@ -26,7 +26,7 @@ In general, contributors should develop on branches based off of `main` and pull
 1. Create an upstream `remote` to make it easier to keep your branches up-to-date:
 
     ```bash
-    git remote add upstream https://github.com/qualcomm/<REPLACE-ME>.git
+    git remote add upstream https://github.com/qualcomm/apt-artifactory-action.git
     ```
 
 1. Make your changes, add tests, and make sure the tests still pass.
