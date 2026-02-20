@@ -1,110 +1,113 @@
 name: "Upload Debian to Artifactory"
 description: "Uploads Debian artifacts from a .changes file to Artifactory"
+
 inputs:
   server_url:
     description: "Artifactory server URL"
     required: false
     default: "https://qartifactory.pe.jfrog.io"
+
   target_base_repo:
     description: "Target repo name (e.g. deb-local or deb-remote)"
-    required: true
+    required: false
+    default: "qsc-debian-local"
+
   changes_path:
     description: "Path to .changes file"
     required: true
+
   provenance_info:
     description: "Extra artifactory properties"
     required: false
     default: "{}"
+
   access_token:
     description: "Artifactory access token (mutually exclusive with qsc_api_key)"
     required: false
+
   qsc_api_key:
     description: "QSC API key - used to generate a temporary access token (mutually exclusive with access_token)"
     required: false
+
+  access_token_data:
+    description: "Access token data for generating access token - used in conjunction with qsc_api_key"
+    required: false
+    default: "{\"softwareName\":\"LU.QCLINUX\",\"softwareType\":\"SoftwareImage\",\"releaseTag\":\"2.0\"}"
+
   component:
     description: "Component name"
     required: false
     default: "main"
 
+  debug:
+    description: "Enable debug output directory in target repo (appends {{github.run_id}} to target path)"
+    required: false
+    default: false
+
 runs:
   using: "composite"
   steps:
-    - name: Install prerequisites
-      shell: bash
-      run: |
-        SUDO=sudo
-        if [ "$(id -u)" = 0 ]; then
-          SUDO=""
-        fi
-        $SUDO apt update
-        $SUDO apt install -y devscripts dctrl-tools jq curl
 
-    - name: Generate token if qsc_api_key is provided
-      env:
-        QSC_API_KEY: ${{ inputs.qsc_api_key }}
-        ARTIFACTORY_ACCESS_TOKEN: ${{ inputs.access_token }}
-      id: gen_token
+    # This step checks for the presence of required Debian packaging tools and installs them if they are missing.
+    # The user is encouraged to install these dependencies in their environment beforehand to speed up the workflow,
+    # but this step ensures that the action can run successfully even if they are not pre-installed.
+    - name: Install dependencies if needed
       shell: bash
       run: |
         set -euo pipefail
 
-        if [ -n "$QSC_API_KEY" ] && [ -n "$ARTIFACTORY_ACCESS_TOKEN" ]; then
-          echo "ERROR: Both qsc_api_key and access_token were provided. These are not compatible."
-          exit 1
-        fi
+        # Sudo if needed
+        SUDO=sudo
+        if [ "$(id -u)" = 0 ]; then SUDO=""; fi
 
-        if [ -n "$QSC_API_KEY" ]; then
-          echo "Generating access token using qsc_api_key..."
-          response=$(curl -s -X POST 'https://apigwx-aws.qualcomm.com/saga/api/qsc/v1/chipSoftware/component/artifactory/release/artifact/debian/public/create/token' \
-            -H 'Content-Type: application/json' \
-            -H 'X-QCOM-TokenType: apikey' \
-            -H "Authorization: $QSC_API_KEY" \
-            -d '{"softwareName":"LE.TEST.1.0","softwareType":"SoftwareImage","releaseTag":"1234"}')
+        # List the debian package names you require
+        required=(devscripts dctrl-tools jq curl)
 
-          token=$(echo "$response" | jq -r '.token')
-
-          if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "ERROR: Failed to generate access token from qsc_api_key."
-            echo "Response was: $response"
-            exit 1
+        # Collect missing packages
+        missing=()
+        for pkg in "${required[@]}"; do
+          if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing+=("$pkg")
           fi
+        done
 
-          echo "access_token=$token" >> $GITHUB_OUTPUT
-        elif [ -n "$ARTIFACTORY_ACCESS_TOKEN" ]; then
-          echo "Using provided access_token..."
-          echo "access_token=$ARTIFACTORY_ACCESS_TOKEN" >> $GITHUB_OUTPUT
+        # Install only if something is missing
+        if ((${#missing[@]})); then
+          echo "Installing missing packages: ${missing[*]}"
+          # Noninteractive + lean + quiet
+          export DEBIAN_FRONTEND=noninteractive
+          $SUDO apt-get update -y -qq
+          $SUDO apt-get install -y -qq --no-install-recommends "${missing[@]}"
         else
-          echo "ERROR: Neither qsc_api_key nor access_token provided."
-          exit 1
+          echo "All prerequisites already installed."
         fi
 
-    - name: Setup JFrog CLI
-      uses: jfrog/setup-jfrog-cli@v4
-      with:
-        version: latest
-
-    - name: Configure JFrog server
+    - name: Validate and parse .changes file
+      id: changes_file
       shell: bash
       env:
-        TOKEN: "${{ steps.gen_token.outputs.access_token }}"
-        SERVER_URL: ${{ inputs.server_url }}
-      run: |
-        jf c add artifactory-server \
-          --url "$SERVER_URL" \
-          --access-token "$TOKEN" \
-          --interactive=false
-
-    - name: Parse .changes and provenance
-      shell: bash
-      env:
-        CHANGES_PATH: ${{ inputs.changes_path }}
+        CHANGES_FILE: ${{ inputs.changes_path }}
         COMPONENT: ${{ inputs.component }}
         PROVENANCE_INFO: ${{ inputs.provenance_info }}
       run: |
         set -euo pipefail
-        CHANGES_DIR="$(dirname "$CHANGES_PATH")"
-        CHANGES_FILE="$(basename "$CHANGES_PATH")"
-        cd "$CHANGES_DIR"
+
+        # verify existence and correct type
+        if [ ! -e "$CHANGES_FILE" ]; then
+          echo "ERROR: changes_path '$CHANGES_FILE' does not exist" >&2
+          exit 1
+        fi
+        if [ ! -f "$CHANGES_FILE" ]; then
+          echo "ERROR: changes_path '$CHANGES_FILE' is not a regular file" >&2
+          exit 1
+        fi
+        if [[ "$CHANGES_FILE" != *.changes ]]; then
+          echo "ERROR: changes_path '$CHANGES_FILE' does not have a .changes extension" >&2
+          exit 1
+        fi
+
+        dir=$(dirname "$CHANGES_FILE")
+        echo "changes_file_dir=$dir" >> $GITHUB_OUTPUT
 
         SUITE="$(grep-dctrl -ns Distribution . "$CHANGES_FILE")"
         SOURCE_PKG="$(grep-dctrl -ns Source . "$CHANGES_FILE")"
@@ -118,22 +121,119 @@ runs:
 
         echo "ALL_FILES=$ALL_FILES" >> $GITHUB_ENV
         echo "SOURCE_PKG=$SOURCE_PKG" >> $GITHUB_ENV
+        echo "SUITE=$SUITE" >> $GITHUB_ENV
         echo "PROPS=$PROPS" >> $GITHUB_ENV
 
-    - name: Upload all artifacts with architecture detection
+        echo "Parsed .changes file:"
+        echo "  Distribution: $SUITE"
+        echo "  Source Package: $SOURCE_PKG"
+        echo "  All Files: $ALL_FILES"
+        echo "  JFrog Properties: $PROPS"
+
+
+    - name: Setup JFrog CLI
+      uses: jfrog/setup-jfrog-cli@v4
+      with:
+        version: latest
+
+    - name: Generate access token if qsc_api_key is provided, otherwise use provided access_token
+      id: gen_token
       shell: bash
       env:
-        TARGET_BASE_REPO: ${{ inputs.target_base_repo }}
+        ACCESS_TOKEN_URL: "https://apigwx-aws.qualcomm.com/saga/api/qsc/v1/chipSoftware/component/artifactory/release/artifact/debian/public/create/token"
+        QSC_API_KEY: ${{ inputs.qsc_api_key }}
+        ACCESS_TOKEN: ${{ inputs.access_token }}
+        ACCESS_TOKEN_DATA: ${{ inputs.access_token_data }}
       run: |
-        TARGET_DIR="$TARGET_BASE_REPO/pool/$SOURCE_PKG/"
+        set -euo pipefail
+
+        if [ -z "$QSC_API_KEY" ] && [ -z "$ACCESS_TOKEN" ]; then
+          echo "ERROR: Neither qsc_api_key nor access_token provided."
+          exit 1
+        fi
+
+        if [ -n "$QSC_API_KEY" ] && [ -n "$ACCESS_TOKEN" ]; then
+          echo "ERROR: Both qsc_api_key and access_token were provided. These are not compatible."
+          exit 1
+        fi
+
+        if [ -n "$ACCESS_TOKEN" ]; then
+          echo "Using provided access_token..."
+          echo "access_token=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+          exit 0  
+        fi
+
+        echo "Generating access token using qsc_api_key..."
+
+        response=$(curl -s \
+          -X POST "$ACCESS_TOKEN_URL" \
+          -H 'Content-Type: application/json' \
+          -H 'X-QCOM-TokenType: apikey' \
+          -H "Authorization: $QSC_API_KEY" \
+          -d "$ACCESS_TOKEN_DATA")
+
+        token=$(echo "$response" | jq -r '.token')
+
+        if [ -z "$token" ] || [ "$token" = "null" ]; then
+          echo "ERROR: Failed to generate access token from qsc_api_key."
+          echo "Response was: $response"
+          exit 1
+        fi
+
+        echo "access_token=$token" >> $GITHUB_OUTPUT
+        echo "Access token generated successfully."
+
+    - name: Configure JFrog server
+      shell: bash
+      env:  
+        SERVER_ID: "artifactory-server"
+        SERVER_URL: ${{ inputs.server_url }}
+        ACCESS_TOKEN: ${{ steps.gen_token.outputs.access_token }}
+      run: |
+        jf c add "$SERVER_ID" \
+          --url "$SERVER_URL" \
+          --access-token "$ACCESS_TOKEN" \
+          --interactive=false
+
+        echo "JFrog CLI configured with server ID: $SERVER_ID"
+        echo "Server URL: $SERVER_URL"
+        jf c show
+
+    - name: Upload all artifacts with architecture detection 
+      working-directory: ${{ steps.changes_file.outputs.changes_file_dir }}
+      shell: bash
+      env:
+        SERVER_ID: "artifactory-server"
+        TARGET_BASE_REPO: ${{ inputs.target_base_repo }}
+        DEBUG_MODE: ${{ inputs.debug }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        TARGET_DIR="$TARGET_BASE_REPO/pool/$SOURCE_PKG/$SUITE/"
+
+        if [ "$DEBUG_MODE" = "true" ]; then
+          echo "Debug mode enabled - appending run_id to target directory"
+          echo "Original TARGET_DIR: $TARGET_DIR"
+          TARGET_DIR="$TARGET_DIR/$RUN_ID/"
+          echo "Modified TARGET_DIR: $TARGET_DIR"
+        fi
+
         for f in $ALL_FILES; do
+
           if [[ "$f" =~ _arm64\.deb$ || "$f" =~ _arm64\.ddeb$ ]]; then
             PROPS="${PROPS};deb.architecture=arm64"
           elif [[ "$f" =~ _amd64\.deb$ || "$f" =~ _amd64\.ddeb$ ]]; then
             PROPS="${PROPS};deb.architecture=amd64"
           fi
-          echo "Uploading $f with props: $PROPS"
-          jf rt upload --server-id=artifactory-server \
+
+          echo "Uploading $f"
+          echo server_id: "$SERVER_ID"
+          echo "props: $PROPS"
+          echo "target: $TARGET_DIR"
+
+          jf rt upload \
+            --server-id="$SERVER_ID" \
             --target-props "${PROPS}" \
-            "$f" "$TARGET_DIR"
+            "$f" \
+            "$TARGET_DIR"
+
         done
