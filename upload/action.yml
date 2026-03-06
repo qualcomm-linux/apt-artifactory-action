@@ -140,7 +140,7 @@ runs:
       id: gen_token
       shell: bash
       env:
-        ACCESS_TOKEN_URL: "https://apigwx-aws.qualcomm.com/saga/api/qsc/v1/chipSoftware/component/artifactory/release/artifact/debian/public/create/token"
+        ACCESS_TOKEN_URL: "https://api.qualcomm.com/softwarecenter/v1/chipSoftware/artifactory/tokens"
         QSC_API_KEY: ${{ inputs.qsc_api_key }}
         ACCESS_TOKEN: ${{ inputs.access_token }}
         ACCESS_TOKEN_DATA: ${{ inputs.access_token_data }}
