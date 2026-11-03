@@ -219,20 +219,26 @@ runs:
 
         for f in $ALL_FILES; do
 
+          # Reset per file so the architecture of one file does not leak into the next
+          FILE_PROPS="$PROPS"
           if [[ "$f" =~ _arm64\.deb$ || "$f" =~ _arm64\.ddeb$ ]]; then
-            PROPS="${PROPS};deb.architecture=arm64"
+            FILE_PROPS="${FILE_PROPS};deb.architecture=arm64"
           elif [[ "$f" =~ _amd64\.deb$ || "$f" =~ _amd64\.ddeb$ ]]; then
-            PROPS="${PROPS};deb.architecture=amd64"
+            FILE_PROPS="${FILE_PROPS};deb.architecture=amd64"
+          elif [[ "$f" =~ _all\.deb$ || "$f" =~ _all\.ddeb$ ]]; then
+            # Architecture: all packages must be indexed for every architecture,
+            # otherwise Artifactory leaves them out of all binary-<arch>/Packages
+            FILE_PROPS="${FILE_PROPS};deb.architecture=amd64,arm64"
           fi
 
           echo "Uploading $f"
           echo server_id: "$SERVER_ID"
-          echo "props: $PROPS"
+          echo "props: $FILE_PROPS"
           echo "target: $TARGET_DIR"
 
           jf rt upload \
             --server-id="$SERVER_ID" \
-            --target-props "${PROPS}" \
+            --target-props "${FILE_PROPS}" \
             "$f" \
             "$TARGET_DIR"
 
