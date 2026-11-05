@@ -76,8 +76,8 @@ runs:
           echo "Installing missing packages: ${missing[*]}"
           # Noninteractive + lean + quiet
           export DEBIAN_FRONTEND=noninteractive
-          $SUDO apt-get update -y -qq
-          $SUDO apt-get install -y -qq --no-install-recommends "${missing[@]}"
+          $SUDO apt-get -o DPkg::Lock::Timeout=300 update -y -qq
+          $SUDO apt-get -o DPkg::Lock::Timeout=300 install -y -qq --no-install-recommends "${missing[@]}"
         else
           echo "All prerequisites already installed."
         fi
